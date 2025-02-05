@@ -1,0 +1,241 @@
+#include <RCSwitch.h>
+#include <Keypad.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
+
+// Constants
+#define EEPROM_SIZE 1024
+#define MAX_CODES 20
+#define CODE_START_ADDR 2
+#define VALID_FLAG_ADDR 1
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+    {'1', '2', '3', 'A'},
+    {'4', '5', '6', 'B'},
+    {'7', '8', '9', 'C'},
+    {'*', '0', '#', 'D'}};
+byte rowPins[ROWS] = {9, 8, 7, 6};
+byte colPins[COLS] = {5, 4, 3, 2};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+RCSwitch mySwitch = RCSwitch();
+const int RF_RECEIVE_PIN = 0;  
+const int RF_TRANSMIT_PIN = 12;
+const int led1Pin = 10; 
+const int led2Pin = 11;
+
+int currentIndex = 0;
+unsigned long lastCapturedCode = 0;
+
+void setup() {
+    Serial.begin(9600);
+    Wire.begin();
+    lcd.init();
+    lcd.backlight();
+    mySwitch.enableReceive(RF_RECEIVE_PIN);
+    mySwitch.enableTransmit(RF_TRANSMIT_PIN);
+    pinMode(led1Pin, OUTPUT);
+    pinMode(led2Pin, OUTPUT);
+    
+    if (EEPROM.read(VALID_FLAG_ADDR) != 0xAA) {
+        clearEEPROM();
+    } else {
+        currentIndex = EEPROM.read(0);
+        if (currentIndex >= MAX_CODES) {
+            currentIndex = 0;
+            EEPROM.write(0, 0);
+        }
+    }
+    
+    displayStartupMessage();
+}
+
+void displayStartupMessage() {
+    lcd.clear();
+    lcd.print("RF Clone v1.1");
+    lcd.setCursor(0, 1);
+    lcd.print("Codigos: ");
+    lcd.print(currentIndex);
+    delay(2000);
+    lcd.clear();
+    displayMenu();
+}
+
+void displayMenu() {
+    lcd.clear();
+    lcd.print("A:Cap B:Grv C:Cln");
+    lcd.setCursor(0, 1);
+    lcd.print("D:Limpar *:Status");
+}
+
+void loop() {
+    char key = keypad.getKey();
+    if (key) {
+        switch (key) {
+            case 'A':
+                captureSignal();
+                break;
+            case 'B':
+                saveToEEPROM();
+                break;
+            case 'C':
+                cloneSignal();
+                break;
+            case 'D':
+                clearEEPROM();
+                break;
+            case '*':
+                showStatus();
+                break;
+            default:
+                break;
+        }
+        displayMenu();
+    }
+}
+
+void captureSignal() {
+    lcd.clear();
+    lcd.print("Capturando...");
+    digitalWrite(led1Pin, HIGH);
+    
+    unsigned long startTime = millis();
+    const unsigned long timeout = 10000; // 10 segundo de timeout
+    bool captured = false;
+    
+    while (millis() - startTime < timeout && !captured) {
+        if (mySwitch.available()) {
+            lastCapturedCode = mySwitch.getReceivedValue();
+            Serial.print("Codigo recebido: ");  // Mensagem de debug
+            Serial.println(lastCapturedCode);   // Mensagem de debug
+            
+            if (lastCapturedCode != 0) {
+                captured = true;
+                Serial.print("Codigo capturado: ");
+                Serial.println(lastCapturedCode);
+                
+                lcd.clear();
+                lcd.print("Capturado:");
+                lcd.setCursor(0, 1);
+                lcd.print(lastCapturedCode);
+                delay(2000);
+            }
+            mySwitch.resetAvailable();
+        }
+    }
+    
+    if (!captured) {
+        lcd.clear();
+        lcd.print("Timeout!");
+        delay(2000);
+    }
+    
+    digitalWrite(led1Pin, LOW);
+}
+
+void saveToEEPROM() {
+    if (lastCapturedCode == 0) {
+        lcd.clear();
+        lcd.print("Nada capturado!");
+        delay(2000);
+        return;
+    }
+    
+    if (currentIndex >= MAX_CODES) {
+        lcd.clear();
+        lcd.print("Memoria cheia!");
+        delay(2000);
+        return;
+    }
+    
+    lcd.clear();
+    lcd.print("Gravando...");
+    digitalWrite(led2Pin, HIGH);
+    
+    // Salvar o código
+    int addr = CODE_START_ADDR + (currentIndex * sizeof(unsigned long));
+    EEPROM.put(addr, lastCapturedCode);
+    currentIndex++;
+    EEPROM.update(0, currentIndex);
+    
+    lcd.clear();
+    lcd.print("Codigo ");
+    lcd.print(currentIndex);
+    lcd.setCursor(0, 1);
+    lcd.print("Gravado!");
+    delay(2000);
+    
+    digitalWrite(led2Pin, LOW);
+}
+
+void cloneSignal() {
+    if (currentIndex == 0) {
+        lcd.clear();
+        lcd.print("Sem codigos!");
+        delay(2000);
+        return;
+    }
+    
+    lcd.clear();
+    lcd.print("Clonando...");
+    digitalWrite(led2Pin, HIGH);
+    
+    for (int i = 0; i < currentIndex; i++) {
+        unsigned long code;
+        int addr = CODE_START_ADDR + (i * sizeof(unsigned long));
+        EEPROM.get(addr, code);
+        
+        if (code != 0) {
+            lcd.setCursor(0, 1);
+            lcd.print("Codigo: ");
+            lcd.print(i + 1);
+            
+            // Enviar cada código 3 vezes para confiabilidade
+            for (int j = 0; j < 3; j++) {
+                mySwitch.send(code, 24);
+                delay(100);
+            }
+            delay(1000);
+        }
+    }
+    
+    digitalWrite(led2Pin, LOW);
+    lcd.clear();
+    lcd.print("Clonagem OK!");
+    delay(2000);
+}
+
+void clearEEPROM() {
+    lcd.clear();
+    lcd.print("Limpando EEPROM...");
+    
+    // Limpar status bytes
+    EEPROM.write(0, 0);  // Reset counter
+    EEPROM.write(VALID_FLAG_ADDR, 0xAA);  // Set initialized flag
+    
+    // Limpar área de armazenamento de código
+    for (int i = CODE_START_ADDR; i < CODE_START_ADDR + (MAX_CODES * sizeof(unsigned long)); i++) {
+        EEPROM.write(i, 0);
+    }
+    
+    currentIndex = 0;
+    lastCapturedCode = 0;
+    
+    lcd.clear();
+    lcd.print("Memoria limpa!");
+    delay(2000);
+}
+
+void showStatus() {
+    lcd.clear();
+    lcd.print("Codigos: ");
+    lcd.print(currentIndex);
+    lcd.setCursor(0, 1);
+    lcd.print("Livre: ");
+    lcd.print(MAX_CODES - currentIndex);
+    delay(2000);
+}
